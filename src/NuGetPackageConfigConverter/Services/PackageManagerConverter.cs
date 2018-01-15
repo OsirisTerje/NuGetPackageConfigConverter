@@ -44,6 +44,7 @@ namespace NuGetPackageConfigConverter
         {
             return _converterViewProvider.ShowAsync(sln, (model, token) =>
             {
+                model.Phase = "1/6: Get Projects";
                 var projects = sln.GetProjects()
                     .Where(p => HasPackageConfig(p) || HasProjectJson(p))
                     .ToList();
@@ -52,22 +53,33 @@ namespace NuGetPackageConfigConverter
                 model.IsIndeterminate = false;
                 model.Count = 1;
 
-                RestoreAll(projects);
+                model.Phase = "2/6: Restore packages in the projects";
+                RestoreAll(projects, model);
 
+                model.Phase = "3/6: Remove and cache Packages";
                 var packages = RemoveAndCachePackages(projects, model, token);
-
                 token.ThrowIfCancellationRequested();
 
-                RemoveDependencyFiles(projects);
+                model.Phase = "4/6: Remove old dependencyfiles";
+                RemoveDependencyFiles(projects, model);
 
-                RefreshSolution(sln, projects);
+                System.Threading.Thread.Sleep(3000);
 
-                InstallPackages(sln, packages, model, token);
+                model.Phase = "5/6: Add new 'use packagereference' property to projectfiles";
+                RefreshSolution(sln, projects, model);
+
+                model.Phase = "6/6: Add packages as packagereferences to projectfiles";
+                InstallPackages(projects, packages, model, token);
+
+               
+
+
             });
         }
 
-        private void RestoreAll(IEnumerable<Project> projects)
+        private void RestoreAll(IEnumerable<Project> projects, ConverterUpdateViewModel model)
         {
+
             foreach (var project in projects)
             {
                 _restorer.RestorePackages(project);
@@ -76,13 +88,15 @@ namespace NuGetPackageConfigConverter
 
         private IDictionary<string, IEnumerable<PackageConfigEntry>> RemoveAndCachePackages(IEnumerable<Project> projects, ConverterUpdateViewModel model, CancellationToken token)
         {
-            var installedPackages = new Dictionary<string, IEnumerable<PackageConfigEntry>>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var project in projects)
+            var installedPackages = new Dictionary<string, IEnumerable<PackageConfigEntry>>(StringComparer.OrdinalIgnoreCase);
+            var projectList = projects.ToList();
+            int total = projectList.Count();
+            foreach (var project in projectList)
             {
                 token.ThrowIfCancellationRequested();
 
-                model.Status = $"Removing old package format for '{project.Name}'";
+                model.Status = $"{model.Count}/{total}  Retrieving and removing old package format for '{project.Name}'";
 
                 var packages = _services.GetInstalledPackages(project)
                     .Select(p => new PackageConfigEntry(p.Id, p.VersionString))
@@ -90,7 +104,7 @@ namespace NuGetPackageConfigConverter
 
                 installedPackages.Add(project.FullName, packages);
 
-                RemovePackages(project, packages.Select(p => p.Id), token);
+                RemovePackages(project, packages.Select(p => p.Id), token, model);
 
                 model.Count++;
             }
@@ -104,41 +118,58 @@ namespace NuGetPackageConfigConverter
         /// <param name="project"></param>
         /// <param name="ids"></param>
         /// <param name="token"></param>
+        /// <param name="model"></param>
         /// <returns></returns>
-        private bool RemovePackages(Project project, IEnumerable<string> ids, CancellationToken token)
+        private bool RemovePackages(Project project, IEnumerable<string> ids, CancellationToken token,
+            ConverterUpdateViewModel model)
         {
             var retryCount = new ConcurrentDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var packages = new Queue<string>(ids);
             var maxRetry = packages.Count + 1;
-
-            while (packages.Count > 0)
+            int maxAttempts = maxRetry * packages.Count;
+            int counter = 0;
+            while (packages.Count > 0 && counter < maxAttempts)
             {
+                counter++;
                 token.ThrowIfCancellationRequested();
 
                 var package = packages.Dequeue();
 
                 try
                 {
+                    model.Log = $"Trying to uninstall {package}    // (counter is {counter})";
                     _uninstaller.UninstallPackage(project, package, false);
+                    model.Log = $"Uninstalled {package}";
+
                 }
                 catch (Exception e)
                 {
                     if (e is InvalidOperationException)
                     {
+                        model.Log = $"Invalid operation exception uninstalling {package} ";
                         Debug.WriteLine(e.Message);
                     }
                     else
                     {
+                        model.Log = $"Exception uninstalling {package} ";
                         Debug.WriteLine(e);
+
                     }
 
                     retryCount.AddOrUpdate(package, 1, (_, count) => count + 1);
 
                     if (retryCount[package] < maxRetry)
                     {
+                        model.Log = $"{package} added back to queue";
                         packages.Enqueue(package);
                     }
                 }
+            }
+
+            if (counter == maxAttempts)
+            {
+                model.Log = $"Could not uninstall all packages in {project.Name}";
+                System.Threading.Thread.Sleep(2000);
             }
 
             return !retryCount.Values.Any(v => v >= maxRetry);
@@ -154,16 +185,19 @@ namespace NuGetPackageConfigConverter
 
         private static ProjectItem GetPackageConfig(Project project) => GetProjectItem(project.ProjectItems, "packages.config");
 
-        private void RemoveDependencyFiles(IEnumerable<Project> projects)
+        private void RemoveDependencyFiles(IEnumerable<Project> projects, ConverterUpdateViewModel model)
         {
-            foreach(var project in projects)
+
+            foreach (var project in projects)
             {
+                model.Status = $"Removing dependency files for '{project.Name}'";
                 RemoveDependencyFiles(project);
             }
         }
 
         private static void RemoveDependencyFiles(Project project)
         {
+
             GetPackageConfig(project)?.Delete();
 
             var projectJson = GetProjectJson(project);
@@ -183,19 +217,46 @@ namespace NuGetPackageConfigConverter
             project.Save();
         }
 
-        private static void RefreshSolution(Solution sln, IEnumerable<Project> projects)
+        private static void RefreshSolution(Solution sln, IEnumerable<Project> projects, ConverterUpdateViewModel model)
         {
-            var projectPaths = projects.Select(p => p.FullName).ToList();
-            var path = sln.FullName;
-
-            sln.Close();
-
-            foreach (var project in projectPaths)
+            try
             {
-                AddRestoreProjectStyle(project);
+
+
+                var projectInfos = projects.Select(p => new ProjectInfo(p.FullName, p.Name)).ToList();
+                var slnPath = sln.FullName;
+
+                sln.Close();
+
+                foreach (var project in projectInfos.Where(p => !string.IsNullOrEmpty(p.FullName)))
+                {
+                    model.Status = $"Fixing restore style in'{project.Name}'";
+                    AddRestoreProjectStyle(project.FullName);
+                }
+
+                sln.Open(slnPath);
+
+            }
+            catch (Exception)
+            {
+                model.Log = $"Exception while working with restore style property.  Do this manually.";
+
             }
 
-            sln.Open(path);
+
+        }
+
+
+        class ProjectInfo
+        {
+            public string FullName { get; }
+            public string Name { get; }
+
+            public ProjectInfo(string fullname, string name)
+            {
+                FullName = fullname;
+                Name = name;
+            }
         }
 
         private static void AddRestoreProjectStyle(string path)
@@ -208,9 +269,9 @@ namespace NuGetPackageConfigConverter
             doc.Save(path);
         }
 
-        private void InstallPackages(Solution sln, IDictionary<string, IEnumerable<PackageConfigEntry>> installedPackages, ConverterUpdateViewModel model, CancellationToken token)
+        private void InstallPackages(IEnumerable<Project> projects, IDictionary<string, IEnumerable<PackageConfigEntry>> installedPackages, ConverterUpdateViewModel model, CancellationToken token)
         {
-            foreach (var project in sln.GetProjects())
+            foreach (var project in projects)
             {
                 token.ThrowIfCancellationRequested();
 
@@ -218,7 +279,7 @@ namespace NuGetPackageConfigConverter
                 {
                     if (installedPackages.TryGetValue(project.FullName, out var packages))
                     {
-                        model.Status = $"Adding packages: {project.Name}";
+                        model.Status = $"Adding PackageReferences: {project.Name}";
 
                         foreach (var package in packages)
                         {
@@ -228,7 +289,7 @@ namespace NuGetPackageConfigConverter
                             }
                             catch (Exception e)
                             {
-                                Trace.WriteLine(e);
+                                model.Log = $"Exception installing {package.Id} ({e}";
                             }
                         }
 
