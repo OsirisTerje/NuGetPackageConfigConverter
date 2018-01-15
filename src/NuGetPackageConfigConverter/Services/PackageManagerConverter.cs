@@ -68,6 +68,8 @@ namespace NuGetPackageConfigConverter
                 model.Phase = "5/6: Add new 'use packagereference' property to projectfiles";
                 RefreshSolution(sln, projects, model);
 
+                System.Threading.Thread.Sleep(3000);
+
                 model.Phase = "6/6: Add packages as packagereferences to projectfiles";
                 InstallPackages(projects, packages, model, token);
 
@@ -101,10 +103,17 @@ namespace NuGetPackageConfigConverter
                 var packages = _services.GetInstalledPackages(project)
                     .Select(p => new PackageConfigEntry(p.Id, p.VersionString))
                     .ToArray();
+                var fullname = project.GetFullName();
+                if (fullname != null)
+                {
+                    installedPackages.Add(fullname, packages);
 
-                installedPackages.Add(project.FullName, packages);
-
-                RemovePackages(project, packages.Select(p => p.Id), token, model);
+                    RemovePackages(project, packages.Select(p => p.Id), token, model);
+                }
+                else
+                {
+                    model.Log = $"{project.Name} not modified, missing fullname";
+                }
 
                 model.Count++;
             }
@@ -223,7 +232,7 @@ namespace NuGetPackageConfigConverter
             {
 
 
-                var projectInfos = projects.Select(p => new ProjectInfo(p.FullName, p.Name)).ToList();
+                var projectInfos = projects.Select(p => new ProjectInfo(p.GetFullName(), p.Name)).ToList();
                 var slnPath = sln.FullName;
 
                 sln.Close();
@@ -271,13 +280,13 @@ namespace NuGetPackageConfigConverter
 
         private void InstallPackages(IEnumerable<Project> projects, IDictionary<string, IEnumerable<PackageConfigEntry>> installedPackages, ConverterUpdateViewModel model, CancellationToken token)
         {
-            foreach (var project in projects)
+            foreach (var project in projects.Where(p=>p.GetFullName()!=null))
             {
                 token.ThrowIfCancellationRequested();
 
                 try
                 {
-                    if (installedPackages.TryGetValue(project.FullName, out var packages))
+                    if (installedPackages.TryGetValue(project.GetFullName(), out var packages))
                     {
                         model.Status = $"Adding PackageReferences: {project.Name}";
 
@@ -331,6 +340,23 @@ namespace NuGetPackageConfigConverter
             }
 
             return null;
+        }
+    }
+
+
+
+    static class ProjectExtensions
+    {
+        public static string GetFullName(this Project project)
+        {
+            try
+            {
+                return project.FullName;
+            }
+            catch (Exception )
+            {
+                return null;
+            }
         }
     }
 }
