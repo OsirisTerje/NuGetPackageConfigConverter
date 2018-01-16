@@ -1,4 +1,5 @@
-﻿using EnvDTE;
+﻿//#define LAUNCHDEBUGGER
+using EnvDTE;
 using EnvDTE80;
 using Microsoft.VisualStudio.ComponentModelHost;
 using Microsoft.VisualStudio.Shell;
@@ -52,6 +53,10 @@ namespace NuGetPackageConfigConverter
 
         private async void MenuItemCallback(object sender, EventArgs e)
         {
+#if LAUNCHDEBUGGER
+                if (!System.Diagnostics.Debugger.IsAttached)
+                    System.Diagnostics.Debugger.Launch();
+#endif
             await _packageConverter.ConvertAsync(_dte.Solution);
         }
     }

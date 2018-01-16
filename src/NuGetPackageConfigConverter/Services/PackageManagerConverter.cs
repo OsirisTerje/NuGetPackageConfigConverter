@@ -4,11 +4,13 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel.Composition;
+using System.Configuration;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
 using System.Xml.Linq;
 
 namespace NuGetPackageConfigConverter
@@ -22,6 +24,7 @@ namespace NuGetPackageConfigConverter
         private readonly IVsPackageRestorer _restorer;
         private readonly IConverterViewProvider _converterViewProvider;
         private readonly IVsPackageInstallerServices _services;
+        private Logger logger;
 
         [ImportingConstructor]
         public PackageManagerConverter(
@@ -43,40 +46,45 @@ namespace NuGetPackageConfigConverter
         public Task ConvertAsync(Solution sln)
         {
             return _converterViewProvider.ShowAsync(sln, (model, token) =>
-            {
-                model.Phase = "1/6: Get Projects";
-                var projects = sln.GetProjects()
-                    .Where(p => HasPackageConfig(p) || HasProjectJson(p))
-                    .ToList();
+             {
+                 logger = new Logger(sln);
+                 model.Phase = "1/6: Get Projects";
+                 var projects = sln.GetProjects()
+                     .Where(p => HasPackageConfig(p) || HasProjectJson(p))
+                     .ToList();
 
-                model.Total = projects.Count * 2 + 1;
-                model.IsIndeterminate = false;
-                model.Count = 1;
+                 model.Total = projects.Count * 2 + 1;
+                 model.IsIndeterminate = false;
+                 model.Count = 1;
 
-                model.Phase = "2/6: Restore packages in the projects";
-                RestoreAll(projects, model);
+                 model.Phase = "2/6: Restore packages in the projects";
+                 RestoreAll(projects, model);
 
-                model.Phase = "3/6: Remove and cache Packages";
-                var packages = RemoveAndCachePackages(projects, model, token);
-                token.ThrowIfCancellationRequested();
+                 model.Phase = "3/6: Remove and cache Packages";
+                 logger.Log(model.Phase);
+                 var packages = RemoveAndCachePackages(projects, model, token);
+                 token.ThrowIfCancellationRequested();
 
-                model.Phase = "4/6: Remove old dependencyfiles";
-                RemoveDependencyFiles(projects, model);
+                 model.Phase = "4/6: Remove old dependencyfiles";
+                 logger.Log(model.Phase);
+                 RemoveDependencyFiles(projects, model);
 
-                System.Threading.Thread.Sleep(3000);
+                 System.Threading.Thread.Sleep(1000);
 
-                model.Phase = "5/6: Add new 'use packagereference' property to projectfiles";
-                RefreshSolution(sln, projects, model);
+                 model.Phase = "5/6: Add new 'use packagereference' property to projectfiles";
+                 logger.Log(model.Phase);
+                 RefreshSolution(sln, projects, model);
 
-                System.Threading.Thread.Sleep(3000);
+                 System.Threading.Thread.Sleep(10000);  // Just to make sure all is really reloaded, can't find any way to check this.
 
-                model.Phase = "6/6: Add packages as packagereferences to projectfiles";
-                InstallPackages(projects, packages, model, token);
+                 model.Phase = "6/6: Add packages as packagereferences to projectfiles";
+                 logger.Log(model.Phase);
+                 var updatedProjects = sln.GetProjects();
+                 InstallPackages(updatedProjects, packages, model, token);
 
-               
+                 logger.Log("Finished");
 
-
-            });
+             });
         }
 
         private void RestoreAll(IEnumerable<Project> projects, ConverterUpdateViewModel model)
@@ -93,12 +101,13 @@ namespace NuGetPackageConfigConverter
 
             var installedPackages = new Dictionary<string, IEnumerable<PackageConfigEntry>>(StringComparer.OrdinalIgnoreCase);
             var projectList = projects.ToList();
-            int total = projectList.Count();
+            int total = projectList.Count;
             foreach (var project in projectList)
             {
                 token.ThrowIfCancellationRequested();
 
                 model.Status = $"{model.Count}/{total}  Retrieving and removing old package format for '{project.Name}'";
+                logger.Log(model.Status);
 
                 var packages = _services.GetInstalledPackages(project)
                     .Select(p => new PackageConfigEntry(p.Id, p.VersionString))
@@ -107,12 +116,13 @@ namespace NuGetPackageConfigConverter
                 if (fullname != null)
                 {
                     installedPackages.Add(fullname, packages);
-
+                    logger.Log($"{project.Name} added {packages.Length} packages");
                     RemovePackages(project, packages.Select(p => p.Id), token, model);
                 }
                 else
                 {
                     model.Log = $"{project.Name} not modified, missing fullname";
+                    logger.Log(model.Log);
                 }
 
                 model.Count++;
@@ -137,6 +147,7 @@ namespace NuGetPackageConfigConverter
             var maxRetry = packages.Count + 1;
             int maxAttempts = maxRetry * packages.Count;
             int counter = 0;
+            logger.Log($"{project.Name}: Packages: {packages.Count}, maxattempts: {maxAttempts}");
             while (packages.Count > 0 && counter < maxAttempts)
             {
                 counter++;
@@ -146,21 +157,28 @@ namespace NuGetPackageConfigConverter
 
                 try
                 {
-                    model.Log = $"Trying to uninstall {package}    // (counter is {counter})";
+                    model.Log = $"Uninstalling {package}";
+                    logger.Log(model.Log+$" (counter = {counter})");
+
                     _uninstaller.UninstallPackage(project, package, false);
                     model.Log = $"Uninstalled {package}";
+                    logger.Log(model.Log);
+                    counter = 0;
+
 
                 }
                 catch (Exception e)
                 {
                     if (e is InvalidOperationException)
                     {
-                        model.Log = $"Invalid operation exception uninstalling {package} ";
+                        model.Log = $"Invalid operation exception when uninstalling {package} ";
+                        logger.Log(model.Log);
                         Debug.WriteLine(e.Message);
                     }
                     else
                     {
                         model.Log = $"Exception uninstalling {package} ";
+                        logger.Log(model.Log);
                         Debug.WriteLine(e);
 
                     }
@@ -170,6 +188,7 @@ namespace NuGetPackageConfigConverter
                     if (retryCount[package] < maxRetry)
                     {
                         model.Log = $"{package} added back to queue";
+                        logger.Log(model.Log);
                         packages.Enqueue(package);
                     }
                 }
@@ -178,6 +197,7 @@ namespace NuGetPackageConfigConverter
             if (counter == maxAttempts)
             {
                 model.Log = $"Could not uninstall all packages in {project.Name}";
+                logger.Log(model.Log);
                 System.Threading.Thread.Sleep(2000);
             }
 
@@ -200,6 +220,7 @@ namespace NuGetPackageConfigConverter
             foreach (var project in projects)
             {
                 model.Status = $"Removing dependency files for '{project.Name}'";
+                logger.Log(model.Status);
                 RemoveDependencyFiles(project);
             }
         }
@@ -226,7 +247,7 @@ namespace NuGetPackageConfigConverter
             project.Save();
         }
 
-        private static void RefreshSolution(Solution sln, IEnumerable<Project> projects, ConverterUpdateViewModel model)
+        private void RefreshSolution(Solution sln, IEnumerable<Project> projects, ConverterUpdateViewModel model)
         {
             try
             {
@@ -234,21 +255,26 @@ namespace NuGetPackageConfigConverter
 
                 var projectInfos = projects.Select(p => new ProjectInfo(p.GetFullName(), p.Name)).ToList();
                 var slnPath = sln.FullName;
-
+                logger.Log("Closing solution");
                 sln.Close();
-
+                int counter = 0;
+                int total = projectInfos.Count(p => !string.IsNullOrEmpty(p.FullName));
                 foreach (var project in projectInfos.Where(p => !string.IsNullOrEmpty(p.FullName)))
                 {
-                    model.Status = $"Fixing restore style in'{project.Name}'";
-                    AddRestoreProjectStyle(project.FullName);
+                    counter++;
+                    model.Status = $"Fixing restore style in'{project.Name}/{project.FullName}'   ({counter}/{total}";
+                    logger.Log(model.Status);
+                    AddRestoreProjectStyle(project.FullName, project, model);
                 }
 
                 sln.Open(slnPath);
-
+                logger.Log("Reopen the solution");
             }
-            catch (Exception)
+            catch (Exception e)
             {
                 model.Log = $"Exception while working with restore style property.  Do this manually.";
+                logger.Log(model.Log);
+                logger.Log(e.ToString());
 
             }
 
@@ -268,42 +294,66 @@ namespace NuGetPackageConfigConverter
             }
         }
 
-        private static void AddRestoreProjectStyle(string path)
+        private void AddRestoreProjectStyle(string path, ProjectInfo project, ConverterUpdateViewModel model)
         {
-            const string NS = "http://schemas.microsoft.com/developer/msbuild/2003";
-            var doc = XDocument.Load(path);
-            var properties = doc.Descendants(XName.Get("PropertyGroup", NS)).FirstOrDefault();
-            properties.LastNode.AddAfterSelf(new XElement(XName.Get("RestoreProjectStyle", NS), "PackageReference"));
-
-            doc.Save(path);
+            try
+            {
+                const string NS = "http://schemas.microsoft.com/developer/msbuild/2003";
+                var doc = XDocument.Load(path);
+                var properties = doc.Descendants(XName.Get("PropertyGroup", NS)).FirstOrDefault();
+                properties?.LastNode.AddAfterSelf(new XElement(XName.Get("RestoreProjectStyle", NS), "PackageReference"));
+                logger.Log($"Fixed projectstyle in ");
+                doc.Save(path);
+            }
+            catch (Exception e)
+            {
+                model.Log = $"Exception: Project {project.Name}/{project.FullName},  Exception: {e.Message},{e}";
+                logger.Log(model.Log);
+            }
         }
 
         private void InstallPackages(IEnumerable<Project> projects, IDictionary<string, IEnumerable<PackageConfigEntry>> installedPackages, ConverterUpdateViewModel model, CancellationToken token)
         {
-            foreach (var project in projects.Where(p=>p.GetFullName()!=null))
-            {
-                token.ThrowIfCancellationRequested();
 
+            var actualProjects = projects.Where(p => p.GetFullName() != null).ToList();
+            logger.Log($"Projects: {actualProjects.Count}    Retrived packages: {installedPackages.Count}");
+            int countProjects = 0;
+            foreach (var project in actualProjects)
+            {
+                countProjects++;
+                token.ThrowIfCancellationRequested();
+                var exist = installedPackages.TryGetValue(project.GetFullName(), out var packages);
+                var packagecount = (exist) ? packages.Count() : 0;
+                logger.Log($"({countProjects}/{actualProjects.Count})  Project {project.Name}/{project.GetFullName()}, packages to install: {packagecount} ");
+                if (packagecount == 0)
+                    continue;
                 try
                 {
-                    if (installedPackages.TryGetValue(project.GetFullName(), out var packages))
+
+                    model.Status = $"({countProjects}/{actualProjects.Count})  Adding PackageReferences: {project.Name}";
+                    int counter = 0;
+                    int countPackages = packages.Count();
+                    foreach (var package in packages)
                     {
-                        model.Status = $"Adding PackageReferences: {project.Name}";
-
-                        foreach (var package in packages)
+                        try
                         {
-                            try
-                            {
-                                _installer.InstallPackage(null, project, package.Id, package.Version, false);
-                            }
-                            catch (Exception e)
-                            {
-                                model.Log = $"Exception installing {package.Id} ({e}";
-                            }
+                            _installer.InstallPackage(null, project, package.Id, package.Version, false);
+                            counter++;
+                            model.Log = $"({counter}/{countPackages}) Added package {package.Id}";
+                            logger.Log(model.Log);
                         }
-
-                        model.Count++;
+                        catch (Exception e)
+                        {
+                            model.Log = $"Exception installing {package.Id} ({e})";
+                            logger.Log(model.Log);
+                        }
                     }
+                    model.Status = $"Added PackageReferences to {project.Name}/{project.FullName},  {counter} out of {packages.Count()} included";
+                    logger.Log(model.Status);
+                    model.Count++;
+
+
+                    System.Threading.Thread.Sleep(1000);
                 }
                 catch (NotImplementedException e)
                 {
@@ -353,10 +403,42 @@ namespace NuGetPackageConfigConverter
             {
                 return project.FullName;
             }
-            catch (Exception )
+            catch (Exception)
             {
                 return null;
             }
         }
     }
+
+
+    public interface ILogger
+    {
+        void Log(string txt);
+    }
+
+    public class Logger : ILogger
+    {
+        private readonly StreamWriter logfile;
+        public Logger(Solution sln)
+        {
+            var folderpath = Path.Combine(Path.GetTempPath(), "NugetPackageConfigConverter");
+            Directory.CreateDirectory(folderpath);
+            var path = Path.Combine(folderpath, sln.FullName+".log");
+            logfile = File.CreateText(path);
+        }
+
+        public void Log(string txt)
+        {
+            logfile.WriteLine(txt);
+            logfile.Flush();
+        }
+
+        public void Close()
+        {
+            logfile.Close();
+        }
+
+    }
+
+
 }

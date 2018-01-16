@@ -7,6 +7,6 @@ namespace NuGetPackageConfigConverter
 {
     public interface IConverterViewProvider
     {
-        Task ShowAsync(Solution sln, Action<ConverterUpdateViewModel, CancellationToken> model);
+        Task  ShowAsync(Solution sln, Action<ConverterUpdateViewModel, CancellationToken> model);
     }
 }
