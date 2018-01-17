@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
     <Metadata>
-        <Identity Id="NuGetPackageConfigConverter.Taylor Southwick.dd0141da-d26f-4013-8b78-72723a313486" Version="0.3.24" Language="en-US" Publisher="Taylor Southwick" />
+        <Identity Id="NuGetPackageConfigConverter.Taylor Southwick.dd0141da-d26f-4013-8b78-72723a313486" Version="0.1" Language="en-US" Publisher="Taylor Southwick" />
         <DisplayName>NuGet PackageReference Updater</DisplayName>
         <Description xml:space="preserve">Converts projects that are using packages.config or project.json to PackageReference</Description>
         <License>LICENSE</License>
